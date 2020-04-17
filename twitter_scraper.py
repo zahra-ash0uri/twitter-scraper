@@ -4,8 +4,12 @@ from pyquery import PyQuery
 
 
 class TwitterScraper:
-    def __init__(self, use_proxy=True):
+    def __init__(self,
+                 use_proxy: bool = False,
+                 proxy_config: dict() = None
+                 ):
         self.use_proxy = use_proxy
+        self.proxy_config = proxy_config
         self.tweetCriteria = dict()
 
     user_agents = [
@@ -20,13 +24,9 @@ class TwitterScraper:
     ]
 
     @staticmethod
-    def _get_proxy(use_proxy):
-        if not use_proxy:
+    def _get_proxy(use_proxy, config):
+        if not use_proxy or not config:
             return None
-        config = {
-            "ip": '',
-            "port": ''
-        }
         return '{}:{}'.format(config.get('ip'), config.get('port'))
 
     def get_tweets(self,
@@ -50,22 +50,22 @@ class TwitterScraper:
 
         cookie_jar = http.cookiejar.CookieJar()
         user_agent = random.choice(TwitterScraper.user_agents)
-        proxy = self._get_proxy(use_proxy=self.use_proxy)
+        proxy = self._get_proxy(use_proxy=self.use_proxy, config=self.proxy_config)
         refresh_cursor = ''
         has_more = True
         results = []
         results_aux = []
         while has_more:
-            json = TwitterScraper.get_json_response(criteria=self.tweetCriteria,
-                                                    refresh_cursor=refresh_cursor,
-                                                    cookie_jar=cookie_jar,
-                                                    proxy=proxy,
-                                                    user_agent=user_agent)
-            if len(json['items_html'].strip()) == 0:
+            data_json = TwitterScraper.get_json_response(criteria=self.tweetCriteria,
+                                                         refresh_cursor=refresh_cursor,
+                                                         cookie_jar=cookie_jar,
+                                                         proxy=proxy,
+                                                         user_agent=user_agent)
+            if len(data_json['items_html'].strip()) == 0:
                 break
-            refresh_cursor = json['min_position']
-            has_more = json['has_more_items']
-            scraped_tweets = PyQuery(json['items_html'])
+            refresh_cursor = data_json['min_position']
+            has_more = data_json['has_more_items']
+            scraped_tweets = PyQuery(data_json['items_html'])
             # Remove incomplete tweets withheld by Twitter Guidelines
             scraped_tweets.remove('div.withheld-tweet')
             tweets = scraped_tweets('div.js-stream-tweet')
@@ -80,17 +80,25 @@ class TwitterScraper:
                     .strftime("%a %b %d %X +0000 %Y")
                 tweet["id"] = int(tweetpq.attr("data-tweet-id"))
 
+                user_mentions = list()
                 in_reply_to_section = tweetpq("div.ReplyingToContextBelowAuthor")
                 tweet["in_reply_to_status_id"] = int(tweetpq.attr("data-conversation-id")) if \
                     tweetpq.attr("data-conversation-id") != str(tweet["id"]) else None
                 tweet["in_reply_to_screen_name"] = None
                 tweet['in_reply_to_user_id'] = None
+                loop_counter = 0
                 for item in in_reply_to_section.items("a"):
                     screen_name = item.attr("href").replace('/', '')
                     user_id = int(item.attr("data-user-id"))
-                    tweet["in_reply_to_screen_name"] = screen_name
-                    tweet['in_reply_to_user_id'] = user_id
-                    break
+                    user_mentions.append({
+                        "id": user_id,
+                        "screen_name": screen_name
+                    })
+                    if loop_counter == 0:
+                        tweet["in_reply_to_screen_name"] = screen_name
+                        tweet['in_reply_to_user_id'] = user_id
+                    loop_counter += 1
+
                 quoted_tweet = tweetpq("div.content")
                 quoted_tweet = quoted_tweet("div.QuoteTweet")
                 if quoted_tweet:
@@ -137,18 +145,27 @@ class TwitterScraper:
                     except KeyError:
                         pass
 
-                _user_mentions = tweetpq("div.js-tweet-text-container")
-                user_mentions = list()
-                for mention in _user_mentions.items("a"):
-                    if mention and mention.attr("data-mentioned-user-id"):
-                        user_mentions.append({
-                            "id": int(mention.attr("data-mentioned-user-id")),
-                            "screen_name": mention.attr("href").replace('/', '')
-                        })
-
-
                 content = tweetpq("p.js-tweet-text")
                 tweet["text"] = content.text()
+
+                if user_mentions:
+                    mentions = ['@'+user["screen_name"] for user in user_mentions]
+                    join = ''
+                    for user in mentions:
+                        join = join + ' ' + user
+                    tweet["text"] = join + content.text()
+
+                in_text_user_mentions = tweetpq("div.js-tweet-text-container")
+                for mention in in_text_user_mentions.items("a"):
+                    if mention and mention.attr("data-mentioned-user-id"):
+                        to_append = {
+                            "id": int(mention.attr("data-mentioned-user-id")),
+                            "screen_name": mention.attr("href").replace('/', '')
+                        }
+                        if to_append not in user_mentions:
+                            user_mentions.append(to_append)
+                        if to_append["screen_name"] not in tweet["text"]:
+                            tweet["text"] = tweet["text"] + ' ' + to_append["screen_name"]
 
                 if 'Emoji--forText' in str(tweetpq("p.TweetTextSize")):
                     emojies = ''
@@ -163,8 +180,8 @@ class TwitterScraper:
                     tweet["text"] = re.sub(r"pic.twitter.com\S+", " " + attached_media_url, tweet["text"])
 
                 hashtags = " ".join(re.compile('(#\\w*)').findall(tweet["text"]))
-                tweet["entities"] = dict()
-                tweet["entities"]["urls"] = urls
+                tweet["extended_entities"] = dict()
+                tweet["extended_entities"]["urls"] = urls
                 media_container = tweetpq("div.AdaptiveMediaOuterContainer")
                 if media_container:
                     media = []
@@ -182,17 +199,16 @@ class TwitterScraper:
                         media_element["type"] = 'photo'
 
                     media.append(media_element)
-                    tweet["entities"]["media"] = media
+                    tweet["extended_entities"]["media"] = media
 
-                tweet["entities"]["user_mentions"] = user_mentions
-                tweet["entities"]["hashtags"] = [hashtag for hashtag in hashtags.split()]
-                tweet["entities"]["symbols"] = []
+                tweet["extended_entities"]["user_mentions"] = user_mentions
+                tweet["extended_entities"]["hashtags"] = [hashtag for hashtag in hashtags.split()]
+                tweet["extended_entities"]["symbols"] = []
                 geo_span = tweetpq('span.Tweet-geo')
                 if len(geo_span) > 0:
                     tweet["geo"] = geo_span.attr('title')
                 else:
                     tweet["geo"] = ''
-
 
                 results.append(tweet)
                 results_aux.append(tweet)
@@ -218,27 +234,26 @@ class TwitterScraper:
                 "&include_available_features=1&include_entities=1&max_position=%s"
                 "&reset_error_state=false")
 
-        urlGetData = ''
+        url_data = ''
 
         if criteria.get('query_search', None):
-            urlGetData += criteria.get('query_search')
+            url_data += criteria.get('query_search')
 
         if criteria.get('username', None):
             username = [' from:' + criteria['username']]
-            urlGetData += ' OR'.join(username)
+            url_data += ' OR'.join(username)
 
         if criteria.get('since', None):
-            urlGetData += ' since:' + criteria.get('since')
+            url_data += ' since:' + criteria.get('since')
 
         if criteria.get('until', None):
-            urlGetData += ' until:' + criteria.get('until')
+            url_data += ' until:' + criteria.get('until')
 
         if criteria.get('lang', None):
-            urlLang = 'l=' + criteria.get('lang') + '&'
+            url_lang = 'l=' + criteria.get('lang') + '&'
         else:
-            urlLang = ''
-        url = url % (urllib.parse.quote(urlGetData.strip()), urlLang, urllib.parse.quote(refresh_cursor))
-        print(url)
+            url_lang = ''
+        url = url % (urllib.parse.quote(url_data.strip()), url_lang, urllib.parse.quote(refresh_cursor))
         user_agent = user_agent or TwitterScraper.user_agents[0]
         headers = [
             ('Host', "twitter.com"),
@@ -255,6 +270,7 @@ class TwitterScraper:
                                                  urllib.request.HTTPCookieProcessor(cookie_jar))
         else:
             opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+
         opener.addheaders = headers
 
         if debug:
@@ -263,35 +279,24 @@ class TwitterScraper:
 
         try:
             response = opener.open(url)
-            jsonResponse = response.read()
+            json_response = response.read()
         except Exception as e:
             print("An error occured during an HTTP request:", str(e))
-            # print("Try to open in browser: https://twitter.com/search?q=%s&src=typd" % urllib.parse.quote(urlGetData))
-            raise (e)
+            print("Try to open in browser: https://twitter.com/search?q=%s&src=typd" % urllib.parse.quote(urlGetData))
+            raise e
 
         try:
-            s_json = jsonResponse.decode()
-            dataJson = json.loads(s_json)
+            s_json = json_response.decode()
+            json_data = json.loads(s_json)
         except Exception as e:
             print("Invalid response from Twitter or Parsing Error!")
-            raise (e)
+            raise e
 
         if debug:
             print(s_json)
             print("---\n")
 
-        return dataJson
+        return json_data
 
 
-if __name__ == '__main__':
-    scraper = TwitterScraper(use_proxy=False)
 
-    """
-        receive_buffer: function called in TwitterScraper.get_tweets to manipulate whatever you want on received tweets.
-    """
-
-    def receive_buffer(tweets):
-        for t in tweets:
-            print(t)
-    results = scraper.get_tweets(receive_buffer=receive_buffer, username='shinyza_', query_search='blah-blah',
-                                 since='2020-01-01', until='2020-04-01', lang='en')
