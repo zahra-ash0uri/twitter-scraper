@@ -16,5 +16,5 @@ if __name__ == '__main__':
     def receive_buffer(tweets):
         for t in tweets:
             print(t)
-    results = scraper.get_tweets(receive_buffer=receive_buffer, username='shinyza_', query_search='blah-blah',
+    results = scraper.get_tweets(receive_buffer=receive_buffer, username='digiato', query_search='blah-blah',
                                  since='2020-01-01', until='2020-04-01', lang='en')

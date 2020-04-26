@@ -1,6 +1,7 @@
 import json, re, datetime, random, http.cookiejar
 import urllib.request, urllib.parse, urllib.error
 from pyquery import PyQuery
+import time
 
 
 class TwitterScraper:
@@ -56,11 +57,17 @@ class TwitterScraper:
         results = []
         results_aux = []
         while has_more:
-            data_json = TwitterScraper.get_json_response(criteria=self.tweetCriteria,
-                                                         refresh_cursor=refresh_cursor,
-                                                         cookie_jar=cookie_jar,
-                                                         proxy=proxy,
-                                                         user_agent=user_agent)
+            try:
+                data_json = TwitterScraper.get_json_response(criteria=self.tweetCriteria,
+                                                             refresh_cursor=refresh_cursor,
+                                                             cookie_jar=cookie_jar,
+                                                             proxy=proxy,
+                                                             user_agent=user_agent)
+            except Exception as e:
+                print("Error while getting json data. {}".format(str(e)))
+                time.sleep(10)
+                continue
+
             if len(data_json['items_html'].strip()) == 0:
                 break
             refresh_cursor = data_json['min_position']
@@ -113,7 +120,7 @@ class TwitterScraper:
                     quoted_tweet = quoted_tweet("div.tweet-content")
                     quoted_tweet = quoted_tweet("div.QuoteTweet-text")
                     quoted_status["lang"] = quoted_tweet.attr("lang")
-                    quoted_status["text"] = quoted_tweet.text()
+                    quoted_status["text"] = TwitterScraper.preprocess_text(quoted_tweet.text())
                     tweet["quoted_status"] = quoted_status
 
                 tweet["user"] = dict()
@@ -179,6 +186,8 @@ class TwitterScraper:
                     attached_media_url = content("a.twitter-timeline-link").attr("href")
                     tweet["text"] = re.sub(r"pic.twitter.com\S+", " " + attached_media_url, tweet["text"])
 
+                tweet["text"] = TwitterScraper.preprocess_text(tweet["text"])
+
                 hashtags = " ".join(re.compile('(#\\w*)').findall(tweet["text"]))
                 tweet["extended_entities"] = dict()
                 tweet["extended_entities"]["urls"] = urls
@@ -219,6 +228,16 @@ class TwitterScraper:
         print("{} tweets gathered up to now!".format(len(results)))
         receive_buffer(results_aux)
         return results
+
+    @staticmethod
+    def preprocess_text(text):
+        atsign_whitespace_pattern = re.compile(r'@\s')
+        hashtag_whitespace_pattern = re.compile(r'#\s')
+        result = re.sub(atsign_whitespace_pattern, ' @', text)
+        result = re.sub(hashtag_whitespace_pattern, ' #', result)
+        result = result.replace('http', ' http')
+        return result
+
 
     @staticmethod
     def get_json_response(criteria, refresh_cursor, cookie_jar, proxy=None, user_agent=None, debug=False):
@@ -282,7 +301,7 @@ class TwitterScraper:
             json_response = response.read()
         except Exception as e:
             print("An error occured during an HTTP request:", str(e))
-            print("Try to open in browser: https://twitter.com/search?q=%s&src=typd" % urllib.parse.quote(urlGetData))
+            print("Try to open in browser: https://twitter.com/search?q=%s&src=typd" % urllib.parse.quote(url_data))
             raise e
 
         try:
